@@ -7,11 +7,9 @@ from pyriemann.utils.distance import distance
 from tqdm import tqdm
 from scipy.linalg import pinvh
 from pyriemann.utils.base import logm
-from src.tWishart import t_wish_est,log_generator_density,kurtosis_estimation, pop,pop_approx
+from src.tWishart import t_wish_est, log_generator_density, kurtosis_estimation, pop, pop_approx, notpop, shrinkage
 
-
-
-def kmeansplusplus_init(S,n_clusters,metric,n_jobs,random_state):
+def kmeansplusplus_init(S,n_clusters,metric,n_jobs,random_state,n):
     """
     Kmeans++ initialization
 
@@ -50,20 +48,38 @@ def kmeansplusplus_init(S,n_clusters,metric,n_jobs,random_state):
     #next centroids
     for l in tqdm(range(1, n_clusters)):
         # Compute distances of possible candidates to already-computed centroids
-        if n_jobs == 1:
-            distances =  [distance(S[indexes],S[j],metric) for j in remaining_idx]
+        if metric in ["kullback","kullback_right","kullback_sym"]:
+            squared = False
         else:
-            distances = Parallel(n_jobs=n_jobs)(
-                    delayed(distance)(S[indexes],S[j],metric) for j in remaining_idx)
-        
-        distances = np.asarray(distances).reshape((K-l,l))
+            squared = True
+        # for divergence d, use d* as metric // d(S,Center)=d*(Center,S) 
+        if metric =="tWishart":
+            if n_jobs == 1:
+                squared_distances = [t_wish_dist(S[indexes],S[j],n,df=5,squared=True) for j in remaining_idx]
+            else:
+                squared_distances = Parallel(n_jobs=n_jobs)(
+                    delayed(t_wish_dist)(S[indexes],S[j],n,df=5,squared=True) for j in remaining_idx)
+        else:
+            if n_jobs == 1:
+                squared_distances =  [distance(S[indexes],S[j],metric,squared=squared) for j in remaining_idx]
+            else:
+                squared_distances = Parallel(n_jobs=n_jobs)(
+                        delayed(distance)(S[indexes],S[j],metric,squared=squared) for j in remaining_idx)
+            
+        squared_distances = np.asarray(squared_distances).reshape((K-l,l))
         
         #compute the squared distance of each sample to the closest centroid
-        squared_distances = np.min(np.asarray(distances)**2,axis=1)
-        assert len(squared_distances)==K-l,"Wrong Kmeans++ init!"
+        squared_distances_min = np.min(squared_distances,axis=1)
+        #print(squared_distances_min)
+        assert len(squared_distances_min)==K-l,"Wrong Kmeans++ init!"
         
+        probas = squared_distances_min
+        for i in range(len(probas)):
+            if np.isnan(probas[i]):
+                probas[i]=0
+        probas = probas/np.sum(probas)
         # Choose next centroid randomly with probability proportional to the squared distances
-        idx = rng.choice(remaining_idx, p=squared_distances/np.sum(squared_distances))
+        idx = rng.choice(remaining_idx, p=probas)
         indexes.append(idx)
         remaining_idx.remove(idx)
     return indexes
@@ -85,7 +101,7 @@ class tW_clustering(BaseEstimator, ClassifierMixin, TransformerMixin):
         if None, they must be estimated.
     estimator : str, default="scm"
         Covariance matrix estimator.
-    df_estimation_method : str or None, default="kurtosis_estimation"
+    df_estimation_method : str or None, default="kurtosis estimation"
         Estimation method for the degrees of freedom (if None)
     n_jobs : int, default=1
         Number of jobs.
@@ -109,7 +125,7 @@ class tW_clustering(BaseEstimator, ClassifierMixin, TransformerMixin):
         Proportions for each class.
     """
 
-    def __init__(self,dfs, estimator = "scm",df_estimation_method="kurtosis_estimation",
+    def __init__(self,dfs, estimator = "scm",df_estimation_method="kurtosis estimation",
                   n_jobs=1,rmt=False):
         """
         Init
@@ -125,7 +141,7 @@ class tW_clustering(BaseEstimator, ClassifierMixin, TransformerMixin):
                 #which is the kurtosis estimation
                 self.df_estimation_method = "kurtosis estimation"
             else:
-                assert self.df_estimation_method in ["kurtosis estimation","pop exact","pop approx"],"Wrong estimation method for shape parameter"
+                assert self.df_estimation_method in ["kurtosis estimation","pop exact","pop approx","notpop","shrinkage"],"Wrong estimation method for shape parameter"
         else:
             assert len(self.dfs)>0,"Empty list for `dfs` "
 
@@ -145,6 +161,12 @@ class tW_clustering(BaseEstimator, ClassifierMixin, TransformerMixin):
             return pop(S,self.n,rmt=self.rmt)
         if self.df_estimation_method=="pop approx":
             return pop_approx(S,self.n,rmt=self.rmt)
+        if self.df_estimation_method=="notpop":
+            return notpop(S,self.n,rmt=self.rmt)
+        if self.df_estimation_method=="shrinkage":
+            return shrinkage(S,self.n,rmt=self.rmt)
+        
+        
            
     def fit(self, X, y):
         """Fit (estimates) the centroids.
@@ -280,7 +302,8 @@ class KMeans_tW(BaseEstimator, ClusterMixin):
     """
 
     def __init__(self, dfs=None,n_clusters=16, n_jobs=1, tol=1e-3,
-                 df_estimation_method="kurtosis_estimation",init="kmeans++",
+                 df_estimation_method="kurtosis estimation",init="kmeans++",
+                 kmeansplusplus_metric = "riemann",
                  max_iter=100,rmt=False,estimator="scm",
                 n_init=10, random_state: int = 42, verbose=0):
         self.n_clusters = n_clusters
@@ -298,6 +321,7 @@ class KMeans_tW(BaseEstimator, ClusterMixin):
         self.rng = np.random.RandomState(self.random_state)
         self.fitted = False
         self.init = init
+        self.kmeansplusplus_metric = kmeansplusplus_metric
         assert self.init in ["kmeans++","random"],"Wrong initilization method! Must be 'kmeans++' or 'random' "
 
     def _init_random_labels(self, X, seed):
@@ -321,6 +345,7 @@ class KMeans_tW(BaseEstimator, ClusterMixin):
         
         cov = Covariances(estimator=self.estimator).fit(X)
         S = cov.transform(X)
+        self.n = X.shape[2]
         
         for i, seed in enumerate(seeds):
 
@@ -331,13 +356,20 @@ class KMeans_tW(BaseEstimator, ClusterMixin):
 
             # Initialize labels randomly
             if self.init=="kmeans++":
-                initial_centroids_idx = kmeansplusplus_init(S, self.n_clusters, "riemann", self.n_jobs, seed)
+                initial_centroids_idx = kmeansplusplus_init(S, self.n_clusters, self.kmeansplusplus_metric, self.n_jobs, seed,self.n)
                 initial_centroids = S[initial_centroids_idx]
                 if self.n_jobs==1:
-                    initial_dists = [distance(initial_centroids,S[j],"riemann") for j in range(S.shape[0])]
+                    if self.kmeansplusplus_metric =="tWishart":
+                        initial_dists = [t_wish_dist(initial_centroids,S[j],self.n,df=5) for j in range(S.shape[0])]
+                    else:
+                        initial_dists = [distance(initial_centroids,S[j],self.kmeansplusplus_metric) for j in range(S.shape[0])]
                 else:
-                    initial_dists = Parallel(n_jobs=self.n_jobs)(
-                        delayed(distance)(initial_centroids,S[j],"riemann") for j in range(S.shape[0]))
+                    if self.kmeansplusplus_metric == "tWishart":
+                        initial_dists = Parallel(n_jobs=self.n_jobs)(
+                            delayed(t_wish_dist)(initial_centroids,S[j],self.n,df=5) for j in range(S.shape[0]))
+                    else:
+                        initial_dists = Parallel(n_jobs=self.n_jobs)(
+                            delayed(distance)(initial_centroids,S[j],self.kmeansplusplus_metric) for j in range(S.shape[0]))
                 initial_dists = np.asarray(initial_dists).reshape((S.shape[0],self.n_clusters))# shape=(K,n_clusters)
                 labels = np.asarray([np.argmin(initial_dists[j,:]) for j in range(S.shape[0])])
                 if self.verbose > 0:
@@ -400,15 +432,15 @@ class KMeans_tW(BaseEstimator, ClusterMixin):
         labels = labels_list[best_init]
         inertia = inertias_list[best_init]
         self.inertia_ = inertia
-        self.tW = self.tW[best_init]
-        self.dfs = self.tW.dfs
+        self.tW_ = self.tW[best_init]
+        self.dfs = self.tW_.dfs
         self.labels_ = labels
         self.fitted = True
 
         return self
 
     def predict(self, X):
-        return self.tW.predict(X)
+        return self.tW_.predict(X)
 
     def transform(self, X, y=None):
         if not self.fitted:
