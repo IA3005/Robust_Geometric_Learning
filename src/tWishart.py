@@ -168,7 +168,7 @@ def t_wish_est(S,n,df,algo="RCG",log_verbosity=0):
         List of the norm gradient of the difference between the current estimated center
         and the previous estimated center along iterations.
     """
-    p = S.shape[1]
+    #p = S.shape[1]
     t = time.time()
     init = np.mean(S,axis=0)/n #np.eye(S.shape[-1])
     if df==np.inf:
@@ -178,9 +178,10 @@ def t_wish_est(S,n,df,algo="RCG",log_verbosity=0):
             t = time.time() - t
             return [init],[t],[0]
             
-    alpha = n/2*(df+n*p)/(df+n*p+2)
-    beta = n/2*(alpha-n/2)
-    manifold = SPD(p,alpha,beta)
+    p = S.shape[1]
+    alpha_ = n/2*(df+n*p)/(df+n*p+2)
+    beta_ = n/2*(alpha_-n/2)
+    manifold = SPD(p,alpha_,beta_)
     
     @pymanopt.function.numpy(manifold)
     def cost(R):
@@ -188,19 +189,21 @@ def t_wish_est(S,n,df,algo="RCG",log_verbosity=0):
     @pymanopt.function.numpy(manifold)
     def euclidean_gradient(R):
         return t_wish_egrad(R,S,n,df)
-    #
+    
     problem = Problem(manifold=manifold, cost=cost, euclidean_gradient=euclidean_gradient)
     assert algo in ["RCG","RGD"],"Wrong Algorithm Name"
     if algo=="RCG": #conjugate gradient
         optimizer = ConjugateGradient(verbosity=0,log_verbosity=log_verbosity)
     else:
         optimizer = SteepestDescent(verbosity=0,log_verbosity=log_verbosity)  
-
-    try: 
+    try:
         optim = optimizer.run(problem, initial_point=init)
-    except: 
-        optim = optimizer.run(problem, initial_point=np.eye(p))
-                              
+    except:
+        try: 
+            optim = optimizer.run(problem, initial_point=np.eye(p))
+        except: 
+            return None
+    
     if log_verbosity==0:
         #return only the MLE
         return optim.point
@@ -269,15 +272,83 @@ def fixed_point(S,n,df, init =None, maxiters=1000,threshold=1e-10):
 
 ## estimate dof for t-Wishart
 
-def pop(samples,n,maxiter=10,threshold=5e-2,rmt=False):
+def shrinkage(samples,n,maxiter=100,threshold=5e-2,rmt=False,verbosity=0):
     K,p,_ = samples.shape
     center_wishart = np.mean(samples,axis=0)/n
     traces = np.einsum("kij,ji->k",samples,pinvh(center_wishart))
     kappa = (np.mean(traces**2)/(n*p*(n*p+2)))-1 #(E(Q²)/E(Q)²)*(np/(np+2))-1
+    if rmt:
+        kappa = (kappa+1)/(1-p/(n*K))-1
     if kappa ==0:
         df_old = np.inf
     else:
         df_old = 2/kappa+4 # kappa = 2/(df-4)
+    #df_old = n*p
+    dfs = [df_old]
+    t= 0
+    error =np.inf
+    #print("ok")
+    while (t<maxiter) and (error>threshold):
+        mle = t_wish_est(samples,n,df_old) #simplify
+        assert mle.shape==(p,p),"wrong dim with mle"
+        theta = np.trace(center_wishart)/np.trace(mle)
+        if rmt:
+            theta = (1-p/(n*K))*theta #correction RMT; to verify theorically
+        df_new = 2*theta/(theta-1)
+        error = np.abs(df_new-df_old)/df_old
+        df_old = df_new
+        dfs.append(df_new)
+        t +=1
+    if verbosity ==0:
+        return dfs[-1]
+    return dfs
+
+def notpop(samples,n,maxiter=100,threshold=5e-2,rmt=False,verbosity=0):
+    K,p,_ = samples.shape
+    center_wishart = np.mean(samples,axis=0)/n
+    traces = np.einsum("kij,ji->k",samples,pinvh(center_wishart))
+    kappa = (np.mean(traces**2)/(n*p*(n*p+2)))-1 #(E(Q²)/E(Q)²)*(np/(np+2))-1
+    if rmt:
+        kappa = (kappa+1)/(1-p/(n*K))-1
+    if kappa ==0:
+        df_old = np.inf
+    else:
+        df_old = 2/kappa+4 # kappa = 2/(df-4)
+    #df_old = n*p
+    dfs = [df_old]
+    t= 0
+    error =np.inf
+    #print("ok")
+    while (t<maxiter) and (error>threshold):
+        mle = t_wish_est(samples,n,df_old) #simplify
+        #inverse_mle = pinvh(mle)
+        inverse_mle = pinv(mle).copy()
+        inverse_mle = (inverse_mle+inverse_mle.T)/2
+        theta = np.einsum("kij,ji->",samples,inverse_mle)/(n*K*p)
+        if rmt:
+            theta = (1-p/(n*K))*theta #correction RMT; to verify theorically
+        df_new = 2*theta/(theta-1)
+        error = np.abs(df_new-df_old)/df_old
+        df_old = df_new
+        dfs.append(df_new)
+        t +=1
+    if verbosity ==0:
+        return dfs[-1]
+    return dfs
+
+
+def pop(samples,n,maxiter=5,threshold=5e-2,rmt=False,verbosity=0):
+    K,p,_ = samples.shape
+    center_wishart = np.mean(samples,axis=0)/n
+    traces = np.einsum("kij,ji->k",samples,pinvh(center_wishart))
+    kappa = (np.mean(traces**2)/(n*p*(n*p+2)))-1 #(E(Q²)/E(Q)²)*(np/(np+2))-1
+    if rmt:
+        kappa = (kappa+1)/(1-p/(n*K))-1
+    if kappa ==0:
+        df_old = np.inf
+    else:
+        df_old = 2/kappa+4 # kappa = 2/(df-4)
+    #df_old = n*p
     dfs = [df_old]
     t= 0
     error =np.inf
@@ -286,7 +357,10 @@ def pop(samples,n,maxiter=10,threshold=5e-2,rmt=False):
         for i in range(K):
             index_i= list(range(0,i))+list(range(i+1,K))
             cov_i = t_wish_est(samples[index_i],n,df_old) #simplify
-            inverses_cov[i,:,:] = pinvh(cov_i)
+            #print(cov_i)
+            #inverses_cov[i,:,:] = pinvh(cov_i)
+            inverse_mle = pinv(cov_i).copy()
+            inverses_cov[i,:,:] = (inverse_mle+inverse_mle.T)/2
         theta = np.einsum("kij,kji->",samples,inverses_cov)/(n*K*p)
         if rmt:
             theta = (1-p/(n*K))*theta #correction RMT; to verify theorically
@@ -295,9 +369,12 @@ def pop(samples,n,maxiter=10,threshold=5e-2,rmt=False):
         df_old = df_new
         dfs.append(df_new)
         t +=1
-    return dfs[-1]
+    if verbosity ==0:
+        return dfs[-1]
+    return dfs
 
-def pop_approx(samples,n,maxiter=10,threshold=5e-2,rmt=False):
+
+def pop_approx(samples,n,maxiter=10,threshold=5e-2,rmt=False,verbosity=0):
     K,p,_ = samples.shape
     center_wishart = np.mean(samples,axis=0)/n
     traces = np.einsum("kij,ji->k",samples,pinvh(center_wishart))
@@ -311,6 +388,8 @@ def pop_approx(samples,n,maxiter=10,threshold=5e-2,rmt=False):
     error =np.inf
     while (t<maxiter) and (error>threshold):
         cov= t_wish_est(samples,n,df_old)
+        if cov is None:
+            return None
         inverses_cov =np.zeros((K,p,p))
         traces = np.einsum("kij,ji->k",samples,pinvh(cov))
         for i in range(K):
@@ -324,7 +403,9 @@ def pop_approx(samples,n,maxiter=10,threshold=5e-2,rmt=False):
         df_old = df_new
         dfs.append(df_new)
         t +=1
-    return dfs[-1]
+    if verbosity ==0:
+        return dfs[-1]
+    return dfs
    
 def kurtosis_estimation(samples,n,center,rmt=False):
     #traces of whitened samples
@@ -340,6 +421,3 @@ def kurtosis_estimation(samples,n,center,rmt=False):
         if kappa==0:
             return np.inf
     return 2 #if kappa<0, df<4 for eg we can choose df=2
-
-
- 
