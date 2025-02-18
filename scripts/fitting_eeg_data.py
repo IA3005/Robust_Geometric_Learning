@@ -2,21 +2,20 @@ from moabb.datasets import Kalunga2016
 from moabb.paradigms import SSVEP,FilterBankSSVEP
 from pyriemann.estimation import Covariances 
 import numpy as np
-from fitting import fit_eeg,estimate_df, fold_covs_per_class
+from src.fitting import fit_eeg,estimate_df, fold_covs_per_class
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-tmin = 2 #offset for trials 
-delta_t = 3 #considered duration for trials
-resampling = 256 #resampling frequency
-selected_subjs = [12] #list of selected subjects from the twelve subjects of the dataset
-#quantity_to_fit = "trace" #change if you want to fit other quantity (see "fitting.py" for more details)
-#df = {'13':40, '17':35, '21':50, 'rest':23} #degrees of freedom for each class
+tmin = 2 # offset for trials 
+delta_t = 3 # considered duration for trials
+resampling = 256 # resampling frequency
+selected_subjs = [12] # list of selected subjects from the twelve subjects of the dataset
 n_jobs = 1
 save_file = True 
 plot_cdf = True
-path="C:/Users/Imen Ayadi/OneDrive - CentraleSupelec/Bureau/thèse/journal paper/jmva_paper_code-main/fitting results seed=123/"
-np.random.seed(123)
+seed = 123
+path=f"results/fitting_eeg_seed={seed}/"
+np.random.seed(seed)
     
 #1. Load the dataset
 dataset = Kalunga2016()
@@ -26,16 +25,16 @@ trials, labels, meta = paradigm.get_data(dataset=dataset,
                                     subjects=selected_subjs)
 X = trials[:,:,:-1]
 K,p,n = X.shape
-    ##X : array of shape (K,p,n)
-    ## K=nbr of trials/p=nbr of electrodes/n=nbr of times samples
+    # X : array of shape (K,p,n)
+    # K=nbr of trials/p=nbr of electrodes/n=nbr of times samples
 unique_labels = np.unique(labels)
 X = (X- np.tile(X.mean(axis=2).reshape(K,p,1),(1,1,n)))/1e6 #recenter and rescale trials
 
 #2. Extract covariance matrices 
 covmats = Covariances().fit_transform(X)*n 
-    ##covmats : array of shape (K,p,p), containing K pxp SPDs
+    # covmats : array of shape (K,p,p), containing K pxp SPDs
 cov_data = {}
-    ##cov_data : dict associating to each selected subject its covmats and labels
+    # cov_data : dict associating to each selected subject its covmats and labels
 i = 0 
 for subject in selected_subjs:
     nb_trials = len(meta[meta['subject']==subject])
@@ -80,4 +79,3 @@ for quantity_to_fit in ["trace", "norm","det","powertrace_2","powertrace_3","pow
                for i in range(len(xs[k])):
                    f.write(f"{xs[k][i]},{eeg_cdf[k][i]},{wishart_cdf[k][i]},{t_wishart_cdf[k][i]} \n")
                    
-    
