@@ -407,9 +407,11 @@ def pop_approx(samples,n,maxiter=10,threshold=5e-2,rmt=False,verbosity=0):
         return dfs[-1]
     return dfs
    
-def kurtosis_estimation(samples,n,center,rmt=False):
+def kurtosis_estimation(samples,n,center=None, rmt=False):
     #traces of whitened samples
     K,p,_ = samples.shape
+    if center is None:
+        center = np.mean(samples,axis=0)/n
     traces = np.einsum("kij,ji->k",samples,pinvh(center))
     #kappa = (E(Q²)/E(Q)²)*(np/(np+2))-1
     kappa = ((n*p)/(n*p+2))*np.mean(traces**2)/(np.mean(traces)**2)-1
